@@ -110,7 +110,8 @@ def transform_content(doc, doc_id):
                             "length": (current_start - last_end) / 1000,
                         }
                     )
-                print(current_text, current_conf_n)
+                if current_end <= current_start:
+                    current_end = current_start + 0.1
                 content.append(
                     {
                         "type": "text",
@@ -124,13 +125,13 @@ def transform_content(doc, doc_id):
                 )
                 last_end = current_end
                 current_text = token["text"]
-                current_start = token["start"]
+                current_start = max(current_end, token["start"])
                 current_end = token["end"]
                 current_conf = token["conf"]
                 current_conf_n = 1
             else:
                 current_text += token["text"]
-                current_end = token["end"]
+                current_end = max(current_end, token["end"])
                 current_conf += token["conf"]
                 current_conf_n += 1
 
@@ -142,20 +143,18 @@ def transform_content(doc, doc_id):
                         "uuid": str(uuid.uuid4()),
                         "source": doc_id,
                         "sourceStart": last_end / 1000,
-                        "length": (current_start - last_end) / 1000
-                        if last_end < current_start
-                        else 0.1,
+                        "length": (current_start - last_end) / 1000,
                     }
                 )
+            if current_end <= current_start:
+                current_end = current_start + 0.1
             content.append(
                 {
                     "type": "text",
                     "uuid": str(uuid.uuid4()),
                     "source": doc_id,
                     "sourceStart": current_start / 1000,
-                    "length": (current_end - current_start) / 1000
-                    if current_start < current_end
-                    else 0.1,
+                    "length": (current_end - current_start) / 1000,
                     "text": current_text,
                     "conf": current_conf / current_conf_n,
                 }
