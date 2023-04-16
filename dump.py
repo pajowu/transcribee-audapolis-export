@@ -229,13 +229,14 @@ if __name__ == "__main__":
     doc = automerge.dump(doc)
 
     doc_metadata = get_doc_metadata(args.base_url, token, doc_id)
+    name = doc_metadata["name"]
     doc_audio_bytes = get_doc_audio_bytes(doc_metadata)
     transformed_document = {
         "version": 3,
         "metadata": {"display_video": False, "display_speaker_names": True},
         "content": repair_content(transform_content(doc, doc_id), doc_id),
     }
-    with zipfile.ZipFile(f"{doc_id}.audapolis", "w") as zf:
+    with zipfile.ZipFile(f"{name}.audapolis", "w") as zf:
         with zf.open(f"sources/{doc_id}", "w") as f:
             f.write(doc_audio_bytes)
 
