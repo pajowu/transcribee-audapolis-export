@@ -6,10 +6,11 @@ import requests
 import websockets
 import enum
 import asyncio
-import tempfile
 import zipfile
 import json
 import uuid
+import argparse
+import urllib.parse
 
 
 class SyncMessageType(enum.IntEnum):
@@ -18,26 +19,25 @@ class SyncMessageType(enum.IntEnum):
     FULL_DOCUMENT = 3
 
 
-def get_token(username: str, password: str):
+def get_token(base_url: str, username: str, password: str):
     req = requests.post(
-        "http://localhost:8000/api/v1/users/login/",
+        f"{base_url}/api/v1/users/login/",
         json={"username": username, "password": password},
     )
     req.raise_for_status()
     return req.json()["token"]
 
 
-def get_documents(token: str):
+def get_documents(base_url: str, token: str):
     req = requests.get(
-        "http://localhost:8000/api/v1/documents",
+        f"{base_url}/api/v1/documents",
         headers={"Authorization": f"Token {token}"},
     )
     req.raise_for_status()
     return req.json()
 
 
-async def dump_doc(token: str, doc_id: str):
-    websocket_base_url = "ws://localhost:8000/sync/"
+async def dump_doc(websocket_base_url: str, token: str, doc_id: str):
     doc = automerge.init({})
     async with websockets.connect(
         f"{websocket_base_url}documents/{doc_id}/"
@@ -52,14 +52,14 @@ async def dump_doc(token: str, doc_id: str):
                 doc = automerge.load(msg[1:])
 
 
-def dump_doc_sync(token: str, doc_id: str):
+def dump_doc_sync(websocket_base_url: str, token: str, doc_id: str):
     loop = asyncio.get_event_loop()
-    return loop.run_until_complete(dump_doc(token, doc_id))
+    return loop.run_until_complete(dump_doc(websocket_base_url, token, doc_id))
 
 
-def get_doc_metadata(token: str, doc_id: str):
+def get_doc_metadata(base_url: str, token: str, doc_id: str):
     req = requests.get(
-        f"http://localhost:8000/api/v1/documents/{doc_id}",
+        f"{base_url}/api/v1/documents/{doc_id}",
         headers={"Authorization": f"Token {token}"},
     )
     req.raise_for_status()
@@ -184,43 +184,60 @@ def repair_content(transformed_content, source):
     return repaired_content
 
 
-questions = [
-    inquirer.Text("name", message="What's your username"),
-    inquirer.Password("password", message="What's your password"),
-]
-answers = inquirer.prompt(questions)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("base_url")
+    parser.add_argument("--username")
+    parser.add_argument("--password")
+    args = parser.parse_args()
 
+    sync_url = urllib.parse.urlparse(args.base_url)
+    sync_url = sync_url._replace(path=sync_url.path + "/sync/")
+    assert sync_url.scheme in ["http", "https"]
+    sync_url = sync_url._replace(scheme="ws" if sync_url.scheme == "http" else "wss")
+    websocket_base_url = urllib.parse.urlunparse(sync_url)
 
-token = get_token(username=answers["name"], password=answers["password"])
+    answers = {"username": args.username, "password": args.password}
 
-docs = get_documents(token)
+    questions = []
+    if args.username is None:
+        questions.append(inquirer.Text("username", message="What's your username"))
+    if args.password is None:
+        questions.append(inquirer.Password("password", message="What's your password"))
 
+    if questions:
+        answers.update(inquirer.prompt(questions))
 
-questions = [
-    inquirer.List(
-        "document",
-        message="What size do you need?",
-        choices=[(d["name"], d["id"]) for d in docs],
-    ),
-]
-answers = inquirer.prompt(questions)
+    token = get_token(
+        args.base_url, username=answers["username"], password=answers["password"]
+    )
 
-doc_id = answers["document"]
+    docs = get_documents(args.base_url, token)
 
-doc = dump_doc_sync(token, doc_id)
-doc = automerge.dump(doc)
+    questions = [
+        inquirer.List(
+            "document",
+            message="What size do you need?",
+            choices=[(d["name"], d["id"]) for d in docs],
+        ),
+    ]
+    answers = inquirer.prompt(questions)
 
-doc_metadata = get_doc_metadata(token, doc_id)
+    doc_id = answers["document"]
 
-doc_audio_bytes = get_doc_audio_bytes(doc_metadata)
-transformed_document = {
-    "version": 3,
-    "metadata": {"display_video": False, "display_speaker_names": True},
-    "content": repair_content(transform_content(doc, doc_id), doc_id),
-}
-with zipfile.ZipFile(f"{doc_id}.audapolis", "w") as zf:
-    with zf.open(f"sources/{doc_id}", "w") as f:
-        f.write(doc_audio_bytes)
+    doc = dump_doc_sync(websocket_base_url, token, doc_id)
+    doc = automerge.dump(doc)
 
-    with zf.open(f"document.json", "w") as f:
-        f.write(json.dumps(transformed_document).encode())
+    doc_metadata = get_doc_metadata(args.base_url, token, doc_id)
+    doc_audio_bytes = get_doc_audio_bytes(doc_metadata)
+    transformed_document = {
+        "version": 3,
+        "metadata": {"display_video": False, "display_speaker_names": True},
+        "content": repair_content(transform_content(doc, doc_id), doc_id),
+    }
+    with zipfile.ZipFile(f"{doc_id}.audapolis", "w") as zf:
+        with zf.open(f"sources/{doc_id}", "w") as f:
+            f.write(doc_audio_bytes)
+
+        with zf.open(f"document.json", "w") as f:
+            f.write(json.dumps(transformed_document).encode())
