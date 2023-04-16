@@ -73,16 +73,19 @@ def get_doc_audio_bytes(doc_metadata):
     return req.content
 
 
-def transform_content(doc, doc_id):
+def transform_content(doc, source):
+    """Transforms the transcribee paragraphs into the audapolis format.
+
+    Note: This does not add `non_text` elements between text elements and does
+    not try to fix timing errors. See `repair_content` for that.
+    """
     content = []
-    last_end = 0
     current_text = None
     current_start = None
     current_end = None
     current_conf = None
     current_conf_n = None
     for paragraph in doc["paragraphs"]:
-        print(paragraph)
         content.append(
             {
                 "type": "paragraph_start",
@@ -100,30 +103,17 @@ def transform_content(doc, doc_id):
                 current_conf_n = 1
                 continue
             if token["text"].startswith(" "):  # New word
-                if current_start > last_end:
-                    content.append(
-                        {
-                            "type": "non_text",
-                            "uuid": str(uuid.uuid4()),
-                            "source": doc_id,
-                            "sourceStart": last_end / 1000,
-                            "length": (current_start - last_end) / 1000,
-                        }
-                    )
-                if current_end <= current_start:
-                    current_end = current_start + 0.1
                 content.append(
                     {
                         "type": "text",
                         "uuid": str(uuid.uuid4()),
-                        "source": doc_id,
+                        "source": source,
                         "sourceStart": current_start / 1000,
                         "length": (current_end - current_start) / 1000,
                         "text": current_text,
                         "conf": current_conf / current_conf_n,
                     }
                 )
-                last_end = current_end
                 current_text = token["text"]
                 current_start = max(current_end, token["start"])
                 current_end = token["end"]
@@ -136,30 +126,17 @@ def transform_content(doc, doc_id):
                 current_conf_n += 1
 
         if current_text is not None:
-            if current_start > last_end:
-                content.append(
-                    {
-                        "type": "non_text",
-                        "uuid": str(uuid.uuid4()),
-                        "source": doc_id,
-                        "sourceStart": last_end / 1000,
-                        "length": (current_start - last_end) / 1000,
-                    }
-                )
-            if current_end <= current_start:
-                current_end = current_start + 0.1
             content.append(
                 {
                     "type": "text",
                     "uuid": str(uuid.uuid4()),
-                    "source": doc_id,
+                    "source": source,
                     "sourceStart": current_start / 1000,
                     "length": (current_end - current_start) / 1000,
                     "text": current_text,
                     "conf": current_conf / current_conf_n,
                 }
             )
-            last_end = current_end
             current_text = None
             current_start = None
             current_end = None
@@ -174,6 +151,39 @@ def transform_content(doc, doc_id):
     return content
 
 
+def repair_content(transformed_content, source):
+    """Takes a audapolis content list and tries to correct some errors.
+
+    This works on the assumption that the content only describes one document from start to finish with no repetitions.
+
+    This functions adds `non_text` elements if there is a space between to consecutive `text` tokens.
+    If a `text` token starts earlier than the previous ended, it moves the start of the token to the end of the previous token.
+    """
+    repaired_content = []
+    last_end = 0
+    for item in transformed_content:
+        if item["type"] != "text":
+            repaired_content.append(item)
+        else:
+            if item["sourceStart"] > last_end:
+                repaired_content.append(
+                    {
+                        "type": "non_text",
+                        "uuid": str(uuid.uuid4()),
+                        "source": source,
+                        "sourceStart": last_end,
+                        "length": (item["sourceStart"] - last_end),
+                    }
+                )
+            if item["sourceStart"] < last_end:
+                end = item["sourceStart"] + item["length"]
+                item["sourceStart"] = last_end
+                item["length"] = end - last_end
+            repaired_content.append(item)
+            last_end = item["sourceStart"] + item["length"]
+    return repaired_content
+
+
 questions = [
     inquirer.Text("name", message="What's your username"),
     inquirer.Password("password", message="What's your password"),
@@ -182,10 +192,8 @@ answers = inquirer.prompt(questions)
 
 
 token = get_token(username=answers["name"], password=answers["password"])
-print(token)
 
 docs = get_documents(token)
-print(docs)
 
 
 questions = [
@@ -196,13 +204,11 @@ questions = [
     ),
 ]
 answers = inquirer.prompt(questions)
-print(answers)
 
 doc_id = answers["document"]
 
 doc = dump_doc_sync(token, doc_id)
 doc = automerge.dump(doc)
-print(doc)
 
 doc_metadata = get_doc_metadata(token, doc_id)
 
@@ -210,12 +216,11 @@ doc_audio_bytes = get_doc_audio_bytes(doc_metadata)
 transformed_document = {
     "version": 3,
     "metadata": {"display_video": False, "display_speaker_names": True},
-    "content": transform_content(doc, doc_id),
+    "content": repair_content(transform_content(doc, doc_id), doc_id),
 }
 with zipfile.ZipFile(f"{doc_id}.audapolis", "w") as zf:
     with zf.open(f"sources/{doc_id}", "w") as f:
         f.write(doc_audio_bytes)
 
-    print(transformed_document)
     with zf.open(f"document.json", "w") as f:
         f.write(json.dumps(transformed_document).encode())
